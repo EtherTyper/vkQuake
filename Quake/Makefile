@@ -60,7 +60,7 @@ CFLAGS += $(call check_gcc,-fweb,)
 CFLAGS += $(call check_gcc,-frename-registers,)
 cmd_strip=$(STRIP) $(1)
 define do_strip
-	$(call cmd_strip,$(1));
+	#$(call cmd_strip,$(1));
 endef
 endif
 
