@@ -26,8 +26,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 
-qmodel_t *loadmodel;
-char      loadname[32]; // for hunk tags
+qmodel_t   *loadmodel;
+static char loadname[32]; // for hunk tags
 
 static void      Mod_LoadSpriteModel (qmodel_t *mod, void *buffer);
 static void      Mod_LoadBrushModel (qmodel_t *mod, void *buffer);
@@ -260,18 +260,19 @@ static void Mod_FreeSpriteMemory (msprite_t *psprite)
 	{
 		if (psprite->frames[i].type == SPR_SINGLE)
 		{
-			Mem_Free (psprite->frames[i].frameptr);
+			SAFE_FREE (psprite->frames[i].frameptr);
 		}
 		else
 		{
 			mspritegroup_t *group = (mspritegroup_t *)psprite->frames[i].frameptr;
 			for (int j = 0; j < group->numframes; ++j)
 			{
-				Mem_Free (group->frames[i]);
+				SAFE_FREE (group->frames[i]);
 			}
-			Mem_Free (psprite->frames[i].frameptr);
+			SAFE_FREE (psprite->frames[i].frameptr);
 		}
 	}
+	psprite->numframes = 0;
 }
 
 /*
@@ -544,25 +545,139 @@ qboolean Mod_CheckAnimTextureArrayQ64 (texture_t *anims[], int numTex)
 
 /*
 =================
-Mod_LoadTextures
+Mod_LoadTextureTask
 =================
 */
-void Mod_LoadTextures (lump_t *l)
+static void Mod_LoadTextureTask (int i, void *unused)
 {
-	int          i, j, pixels, num, maxanim, altmax;
-	miptex_t     mt;
-	texture_t   *tx, *tx2;
-	texture_t   *anims[10];
-	texture_t   *altanims[10];
-	byte        *m;
-	byte        *pixels_p;
+	texture_t *tx = loadmodel->textures[i];
+	if (!tx)
+		return;
+
+	byte        *pixels_p = (byte *)tx + sizeof (texture_t);
+	int          pixels = tx->width * tx->height / 64 * 85;
 	char         texturename[64];
-	int          nummiptex;
-	int          dataofs;
 	src_offset_t offset;
 	int          fwidth, fheight;
 	char         filename[MAX_OSPATH], filename2[MAX_OSPATH], mapname[MAX_OSPATH];
 	byte        *data = NULL;
+
+	if (!q_strncasecmp (tx->name, "sky", 3)) // sky texture //also note -- was strncmp, changed to match qbsp
+	{
+		if (loadmodel->bspversion == BSPVERSION_QUAKE64)
+			Sky_LoadTextureQ64 (tx);
+		else
+			Sky_LoadTexture (tx);
+	}
+	else if (tx->name[0] == '*') // warping texture
+	{
+		// external textures -- first look in "textures/mapname/" then look in "textures/"
+		COM_StripExtension (loadmodel->name + 5, mapname, sizeof (mapname));
+		q_snprintf (filename, sizeof (filename), "textures/%s/#%s", mapname, tx->name + 1); // this also replaces the '*' with a '#'
+		data = Image_LoadImage (filename, &fwidth, &fheight);
+		if (!data)
+		{
+			q_snprintf (filename, sizeof (filename), "textures/#%s", tx->name + 1);
+			data = Image_LoadImage (filename, &fwidth, &fheight);
+		}
+
+		// now load whatever we found
+		if (data) // load external image
+		{
+			q_strlcpy (texturename, filename, sizeof (texturename));
+			tx->gltexture = TexMgr_LoadImage (loadmodel, texturename, fwidth, fheight, SRC_RGBA, data, filename, 0, TEXPREF_NONE);
+		}
+		else // use the texture from the bsp file
+		{
+			q_snprintf (texturename, sizeof (texturename), "%s:%s", loadmodel->name, tx->name);
+			offset = (src_offset_t)(pixels_p) - (src_offset_t)mod_base;
+			tx->gltexture =
+				TexMgr_LoadImage (loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset, TEXPREF_NONE);
+		}
+
+		// now create the warpimage, using dummy data from the hunk to create the initial image
+		q_snprintf (texturename, sizeof (texturename), "%s_warp", texturename);
+		tx->warpimage = TexMgr_LoadImage (loadmodel, texturename, WARPIMAGESIZE, WARPIMAGESIZE, SRC_RGBA, NULL, "", 0, TEXPREF_NOPICMIP | TEXPREF_WARPIMAGE);
+		tx->update_warp = true;
+	}
+	else // regular texture
+	{
+		// ericw -- fence textures
+		int extraflags;
+
+		extraflags = 0;
+		if (tx->name[0] == '{')
+			extraflags |= TEXPREF_ALPHA;
+		// ericw
+
+		// external textures -- first look in "textures/mapname/" then look in "textures/"
+		COM_StripExtension (loadmodel->name + 5, mapname, sizeof (mapname));
+		q_snprintf (filename, sizeof (filename), "textures/%s/%s", mapname, tx->name);
+		data = Image_LoadImage (filename, &fwidth, &fheight);
+		if (!data)
+		{
+			q_snprintf (filename, sizeof (filename), "textures/%s", tx->name);
+			data = Image_LoadImage (filename, &fwidth, &fheight);
+		}
+
+		// now load whatever we found
+		if (data) // load external image
+		{
+			tx->gltexture = TexMgr_LoadImage (loadmodel, filename, fwidth, fheight, SRC_RGBA, data, filename, 0, TEXPREF_MIPMAP | extraflags);
+			Mem_Free (data);
+
+			// now try to load glow/luma image from the same place
+			q_snprintf (filename2, sizeof (filename2), "%s_glow", filename);
+			data = Image_LoadImage (filename2, &fwidth, &fheight);
+			if (!data)
+			{
+				q_snprintf (filename2, sizeof (filename2), "%s_luma", filename);
+				data = Image_LoadImage (filename2, &fwidth, &fheight);
+			}
+
+			if (data)
+				tx->fullbright = TexMgr_LoadImage (loadmodel, filename2, fwidth, fheight, SRC_RGBA, data, filename, 0, TEXPREF_MIPMAP | extraflags);
+		}
+		else // use the texture from the bsp file
+		{
+			q_snprintf (texturename, sizeof (texturename), "%s:%s", loadmodel->name, tx->name);
+			offset = (src_offset_t)(pixels_p) - (src_offset_t)mod_base;
+			if (Mod_CheckFullbrights ((byte *)(tx + 1), pixels))
+			{
+				tx->gltexture = TexMgr_LoadImage (
+					loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset,
+					TEXPREF_MIPMAP | TEXPREF_NOBRIGHT | extraflags);
+				q_snprintf (texturename, sizeof (texturename), "%s:%s_glow", loadmodel->name, tx->name);
+				tx->fullbright = TexMgr_LoadImage (
+					loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset,
+					TEXPREF_MIPMAP | TEXPREF_FULLBRIGHT | extraflags);
+			}
+			else
+			{
+				tx->gltexture = TexMgr_LoadImage (
+					loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset, TEXPREF_MIPMAP | extraflags);
+			}
+		}
+	}
+	Mem_Free (data);
+}
+
+/*
+=================
+Mod_LoadTextures
+=================
+*/
+static void Mod_LoadTextures (lump_t *l)
+{
+	int        i, j, pixels, num, maxanim, altmax;
+	miptex_t   mt;
+	texture_t *tx, *tx2;
+	texture_t *anims[10];
+	texture_t *altanims[10];
+	byte      *m;
+	byte      *pixels_p;
+	int        nummiptex;
+	int        dataofs;
 
 	// johnfitz -- don't return early if no textures; still need to create dummy texture
 	if (!l->filelen)
@@ -628,110 +743,20 @@ void Mod_LoadTextures (lump_t *l)
 			tx->shift = ReadLongUnaligned (m + dataofs + offsetof (miptex64_t, shift));
 			memcpy (tx + 1, m + dataofs + sizeof (miptex64_t), pixels);
 		}
+	}
 
-		// johnfitz -- lots of changes
-		if (!isDedicated) // no texture uploading for dedicated server
+	if (!isDedicated)
+	{
+		if (!Tasks_IsWorker () && (nummiptex > 1))
 		{
-			if (!q_strncasecmp (tx->name, "sky", 3)) // sky texture //also note -- was strncmp, changed to match qbsp
-			{
-				if (loadmodel->bspversion == BSPVERSION_QUAKE64)
-					Sky_LoadTextureQ64 (tx);
-				else
-					Sky_LoadTexture (tx);
-			}
-			else if (tx->name[0] == '*') // warping texture
-			{
-				// external textures -- first look in "textures/mapname/" then look in "textures/"
-				COM_StripExtension (loadmodel->name + 5, mapname, sizeof (mapname));
-				q_snprintf (filename, sizeof (filename), "textures/%s/#%s", mapname, tx->name + 1); // this also replaces the '*' with a '#'
-				data = Image_LoadImage (filename, &fwidth, &fheight);
-				if (!data)
-				{
-					q_snprintf (filename, sizeof (filename), "textures/#%s", tx->name + 1);
-					data = Image_LoadImage (filename, &fwidth, &fheight);
-				}
-
-				// now load whatever we found
-				if (data) // load external image
-				{
-					q_strlcpy (texturename, filename, sizeof (texturename));
-					tx->gltexture = TexMgr_LoadImage (loadmodel, texturename, fwidth, fheight, SRC_RGBA, data, filename, 0, TEXPREF_NONE);
-				}
-				else // use the texture from the bsp file
-				{
-					q_snprintf (texturename, sizeof (texturename), "%s:%s", loadmodel->name, tx->name);
-					offset = (src_offset_t)(pixels_p) - (src_offset_t)mod_base;
-					tx->gltexture =
-						TexMgr_LoadImage (loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset, TEXPREF_NONE);
-				}
-
-				// now create the warpimage, using dummy data from the hunk to create the initial image
-				q_snprintf (texturename, sizeof (texturename), "%s_warp", texturename);
-				tx->warpimage =
-					TexMgr_LoadImage (loadmodel, texturename, WARPIMAGESIZE, WARPIMAGESIZE, SRC_RGBA, NULL, "", 0, TEXPREF_NOPICMIP | TEXPREF_WARPIMAGE);
-				tx->update_warp = true;
-			}
-			else // regular texture
-			{
-				// ericw -- fence textures
-				int extraflags;
-
-				extraflags = 0;
-				if (tx->name[0] == '{')
-					extraflags |= TEXPREF_ALPHA;
-				// ericw
-
-				// external textures -- first look in "textures/mapname/" then look in "textures/"
-				COM_StripExtension (loadmodel->name + 5, mapname, sizeof (mapname));
-				q_snprintf (filename, sizeof (filename), "textures/%s/%s", mapname, tx->name);
-				data = Image_LoadImage (filename, &fwidth, &fheight);
-				if (!data)
-				{
-					q_snprintf (filename, sizeof (filename), "textures/%s", tx->name);
-					data = Image_LoadImage (filename, &fwidth, &fheight);
-				}
-
-				// now load whatever we found
-				if (data) // load external image
-				{
-					tx->gltexture = TexMgr_LoadImage (loadmodel, filename, fwidth, fheight, SRC_RGBA, data, filename, 0, TEXPREF_MIPMAP | extraflags);
-					Mem_Free (data);
-
-					// now try to load glow/luma image from the same place
-					q_snprintf (filename2, sizeof (filename2), "%s_glow", filename);
-					data = Image_LoadImage (filename2, &fwidth, &fheight);
-					if (!data)
-					{
-						q_snprintf (filename2, sizeof (filename2), "%s_luma", filename);
-						data = Image_LoadImage (filename2, &fwidth, &fheight);
-					}
-
-					if (data)
-						tx->fullbright = TexMgr_LoadImage (loadmodel, filename2, fwidth, fheight, SRC_RGBA, data, filename, 0, TEXPREF_MIPMAP | extraflags);
-				}
-				else // use the texture from the bsp file
-				{
-					q_snprintf (texturename, sizeof (texturename), "%s:%s", loadmodel->name, tx->name);
-					offset = (src_offset_t)(pixels_p) - (src_offset_t)mod_base;
-					if (Mod_CheckFullbrights ((byte *)(tx + 1), pixels))
-					{
-						tx->gltexture = TexMgr_LoadImage (
-							loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset,
-							TEXPREF_MIPMAP | TEXPREF_NOBRIGHT | extraflags);
-						q_snprintf (texturename, sizeof (texturename), "%s:%s_glow", loadmodel->name, tx->name);
-						tx->fullbright = TexMgr_LoadImage (
-							loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset,
-							TEXPREF_MIPMAP | TEXPREF_FULLBRIGHT | extraflags);
-					}
-					else
-					{
-						tx->gltexture = TexMgr_LoadImage (
-							loadmodel, texturename, tx->width, tx->height, SRC_INDEXED, (byte *)(tx + 1), loadmodel->name, offset, TEXPREF_MIPMAP | extraflags);
-					}
-				}
-			}
+			task_handle_t task = Task_AllocateAssignIndexedFuncAndSubmit (Mod_LoadTextureTask, nummiptex, NULL, 0);
+			Task_Join (task, SDL_MUTEX_MAXWAIT);
 		}
-		SAFE_FREE (data);
+		else
+		{
+			for (i = 0; i < nummiptex; i++)
+				Mod_LoadTextureTask (i, NULL);
+		}
 	}
 
 	// johnfitz -- last 2 slots in array should be filled with dummy textures
@@ -1739,7 +1764,7 @@ void Mod_CheckWaterVis (void)
 
 	// pvs is 1-based. leaf 0 sees all (the solid leaf).
 	// leaf 0 has no pvs, and does not appear in other leafs either, so watch out for the biases.
-	for (i = 0, leaf = loadmodel->leafs + 1; i < numclusters; i++, leaf++)
+	for (i = 0, leaf = loadmodel->leafs + 1; i < numclusters - 1; i++, leaf++)
 	{
 		byte *vis;
 		if (leaf->contents < 0) // err... wtf?
@@ -2660,115 +2685,152 @@ void Mod_FloodFillSkin (byte *skin, int skinwidth, int skinheight)
 
 /*
 ===============
-Mod_LoadAllSkins
+Mod_LoadSkinTask
 ===============
 */
-void *Mod_LoadAllSkins (int numskins, byte *pskintype)
+static void Mod_LoadSkinTask (int i, byte ***ppskintypes)
 {
-	int          i, j, k, size, groupskins;
+	int          j, k, size, groupskins;
 	char         name[MAX_QPATH];
 	byte        *skin, *texels;
+	byte        *pskintype = (*ppskintypes)[i];
 	byte        *pinskingroup;
 	byte        *pinskinintervals;
 	char         fbr_mask_name[MAX_QPATH]; // johnfitz -- added for fullbright support
 	src_offset_t offset;                   // johnfitz
 	unsigned int texflags = TEXPREF_PAD;
 
-	if (numskins < 1 || numskins > MAX_SKINS)
-		Sys_Error ("Mod_LoadAliasModel: Invalid # of skins: %d", numskins);
-
 	size = pheader->skinwidth * pheader->skinheight;
 
 	if (loadmodel->flags & MF_HOLEY)
 		texflags |= TEXPREF_ALPHA;
 
-	for (i = 0; i < numskins; i++)
+	if (ReadLongUnaligned (pskintype + offsetof (daliasskintype_t, type)) == ALIAS_SKIN_SINGLE)
 	{
-		if (ReadLongUnaligned (pskintype + offsetof (daliasskintype_t, type)) == ALIAS_SKIN_SINGLE)
-		{
-			skin = pskintype + sizeof (daliasskintype_t);
-			Mod_FloodFillSkin (skin, pheader->skinwidth, pheader->skinheight);
+		skin = pskintype + sizeof (daliasskintype_t);
+		Mod_FloodFillSkin (skin, pheader->skinwidth, pheader->skinheight);
 
-			// save 8 bit texels for the player model to remap
-			texels = (byte *)Mem_Alloc (size);
-			pheader->texels[i] = texels - (byte *)pheader;
-			memcpy (texels, skin, size);
+		// save 8 bit texels for the player model to remap
+		texels = (byte *)Mem_Alloc (size);
+		pheader->texels[i] = texels;
+		memcpy (texels, skin, size);
+
+		// johnfitz -- rewritten
+		q_snprintf (name, sizeof (name), "%s:frame%i", loadmodel->name, i);
+		offset = (src_offset_t)(skin) - (src_offset_t)mod_base;
+		if (Mod_CheckFullbrights (skin, size))
+		{
+			pheader->gltextures[i][0] = TexMgr_LoadImage (
+				loadmodel, name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset,
+				texflags | TEXPREF_MIPMAP | TEXPREF_NOBRIGHT);
+			q_snprintf (fbr_mask_name, sizeof (fbr_mask_name), "%s:frame%i_glow", loadmodel->name, i);
+			pheader->fbtextures[i][0] = TexMgr_LoadImage (
+				loadmodel, fbr_mask_name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset,
+				texflags | TEXPREF_MIPMAP | TEXPREF_FULLBRIGHT);
+		}
+		else
+		{
+			pheader->gltextures[i][0] = TexMgr_LoadImage (
+				loadmodel, name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset, texflags | TEXPREF_MIPMAP);
+			pheader->fbtextures[i][0] = NULL;
+		}
+
+		pheader->gltextures[i][3] = pheader->gltextures[i][2] = pheader->gltextures[i][1] = pheader->gltextures[i][0];
+		pheader->fbtextures[i][3] = pheader->fbtextures[i][2] = pheader->fbtextures[i][1] = pheader->fbtextures[i][0];
+		// johnfitz
+	}
+	else
+	{
+		// animating skin group.  yuck.
+		pinskingroup = pskintype + sizeof (daliasskintype_t);
+		groupskins = ReadLongUnaligned (pinskingroup + offsetof (daliasskingroup_t, numskins));
+		pinskinintervals = pinskingroup + sizeof (daliasskingroup_t);
+		skin = pinskinintervals + (groupskins * sizeof (daliasskininterval_t));
+
+		for (j = 0; j < groupskins; j++)
+		{
+			Mod_FloodFillSkin (skin, pheader->skinwidth, pheader->skinheight);
+			if (j == 0)
+			{
+				texels = (byte *)Mem_Alloc (size);
+				pheader->texels[i] = texels;
+				memcpy (texels, skin, size);
+			}
 
 			// johnfitz -- rewritten
-			q_snprintf (name, sizeof (name), "%s:frame%i", loadmodel->name, i);
-			offset = (src_offset_t)(skin) - (src_offset_t)mod_base;
+			q_snprintf (name, sizeof (name), "%s:frame%i_%i", loadmodel->name, i, j);
+			offset = (src_offset_t)(skin) - (src_offset_t)mod_base; // johnfitz
 			if (Mod_CheckFullbrights (skin, size))
 			{
-				pheader->gltextures[i][0] = TexMgr_LoadImage (
+				pheader->gltextures[i][j & 3] = TexMgr_LoadImage (
 					loadmodel, name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset,
 					texflags | TEXPREF_MIPMAP | TEXPREF_NOBRIGHT);
-				q_snprintf (fbr_mask_name, sizeof (fbr_mask_name), "%s:frame%i_glow", loadmodel->name, i);
-				pheader->fbtextures[i][0] = TexMgr_LoadImage (
+				q_snprintf (fbr_mask_name, sizeof (fbr_mask_name), "%s:frame%i_%i_glow", loadmodel->name, i, j);
+				pheader->fbtextures[i][j & 3] = TexMgr_LoadImage (
 					loadmodel, fbr_mask_name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset,
 					texflags | TEXPREF_MIPMAP | TEXPREF_FULLBRIGHT);
 			}
 			else
 			{
-				pheader->gltextures[i][0] = TexMgr_LoadImage (
+				pheader->gltextures[i][j & 3] = TexMgr_LoadImage (
 					loadmodel, name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset, texflags | TEXPREF_MIPMAP);
-				pheader->fbtextures[i][0] = NULL;
+				pheader->fbtextures[i][j & 3] = NULL;
 			}
-
-			pheader->gltextures[i][3] = pheader->gltextures[i][2] = pheader->gltextures[i][1] = pheader->gltextures[i][0];
-			pheader->fbtextures[i][3] = pheader->fbtextures[i][2] = pheader->fbtextures[i][1] = pheader->fbtextures[i][0];
 			// johnfitz
 
+			skin += size;
+		}
+		k = j;
+		for (/**/; j < 4; j++)
+			pheader->gltextures[i][j & 3] = pheader->gltextures[i][j - k];
+	}
+}
+
+/*
+===============
+Mod_LoadAllSkins
+===============
+*/
+void *Mod_LoadAllSkins (int numskins, byte *pskintype)
+{
+	if (numskins < 1 || numskins > MAX_SKINS)
+		Sys_Error ("Mod_LoadAliasModel: Invalid # of skins: %d", numskins);
+
+	byte **ppskintypes;
+	TEMP_ALLOC (byte *, ppskintypes, numskins);
+	int size = pheader->skinwidth * pheader->skinheight;
+	for (int i = 0; i < numskins; i++)
+	{
+		ppskintypes[i] = pskintype;
+		if (ReadLongUnaligned (pskintype + offsetof (daliasskintype_t, type)) == ALIAS_SKIN_SINGLE)
+		{
 			pskintype += sizeof (daliasskintype_t) + size;
 		}
 		else
 		{
 			// animating skin group.  yuck.
-			pinskingroup = pskintype + sizeof (daliasskintype_t);
-			groupskins = ReadLongUnaligned (pinskingroup + offsetof (daliasskingroup_t, numskins));
-			pinskinintervals = pinskingroup + sizeof (daliasskingroup_t);
-			skin = pinskinintervals + (groupskins * sizeof (daliasskininterval_t));
-
-			for (j = 0; j < groupskins; j++)
-			{
-				Mod_FloodFillSkin (skin, pheader->skinwidth, pheader->skinheight);
-				if (j == 0)
-				{
-					texels = (byte *)Mem_Alloc (size);
-					pheader->texels[i] = texels - (byte *)pheader;
-					memcpy (texels, skin, size);
-				}
-
-				// johnfitz -- rewritten
-				q_snprintf (name, sizeof (name), "%s:frame%i_%i", loadmodel->name, i, j);
-				offset = (src_offset_t)(skin) - (src_offset_t)mod_base; // johnfitz
-				if (Mod_CheckFullbrights (skin, size))
-				{
-					pheader->gltextures[i][j & 3] = TexMgr_LoadImage (
-						loadmodel, name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset,
-						texflags | TEXPREF_MIPMAP | TEXPREF_NOBRIGHT);
-					q_snprintf (fbr_mask_name, sizeof (fbr_mask_name), "%s:frame%i_%i_glow", loadmodel->name, i, j);
-					pheader->fbtextures[i][j & 3] = TexMgr_LoadImage (
-						loadmodel, fbr_mask_name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset,
-						texflags | TEXPREF_MIPMAP | TEXPREF_FULLBRIGHT);
-				}
-				else
-				{
-					pheader->gltextures[i][j & 3] = TexMgr_LoadImage (
-						loadmodel, name, pheader->skinwidth, pheader->skinheight, SRC_INDEXED, skin, loadmodel->name, offset, texflags | TEXPREF_MIPMAP);
-					pheader->fbtextures[i][j & 3] = NULL;
-				}
-				// johnfitz
-
-				skin += size;
-			}
-			k = j;
-			for (/**/; j < 4; j++)
-				pheader->gltextures[i][j & 3] = pheader->gltextures[i][j - k];
-
-			pskintype = skin;
+			byte *pinskingroup = pskintype + sizeof (daliasskintype_t);
+			int   groupskins = ReadLongUnaligned (pinskingroup + offsetof (daliasskingroup_t, numskins));
+			byte *pinskinintervals = pinskingroup + sizeof (daliasskingroup_t);
+			byte *skin = pinskinintervals + (groupskins * sizeof (daliasskininterval_t));
+			pskintype = skin + (groupskins * size);
 		}
 	}
 
+	if (!Tasks_IsWorker () && (numskins > 1))
+	{
+		task_handle_t task = Task_AllocateAssignIndexedFuncAndSubmit ((task_indexed_func_t)Mod_LoadSkinTask, numskins, &ppskintypes, sizeof (byte **));
+		Task_Join (task, SDL_MUTEX_MAXWAIT);
+	}
+	else
+	{
+		for (int i = 0; i < numskins; i++)
+		{
+			Mod_LoadSkinTask (i, &ppskintypes);
+		}
+	}
+
+	TEMP_FREE (ppskintypes);
 	return (void *)pskintype;
 }
 

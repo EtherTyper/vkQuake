@@ -27,6 +27,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "cfgfile.h"
 
+#include <setjmp.h>
+
 /*
 
 background clear
@@ -131,6 +133,7 @@ qboolean scr_drawloading;
 float    scr_disabled_time;
 
 qboolean in_update_screen;
+extern jmp_buf screen_error;
 
 int scr_tileclear_updates = 0; // johnfitz
 
@@ -1029,6 +1032,9 @@ static void SCR_DrawGUI (void *unused)
 	R_BeginDebugUtilsLabel (cbx, "2D");
 	SCR_TileClear (cbx);
 
+	if (cl.qcvm.extfuncs.CSQC_DrawHud && setjmp (screen_error))
+		PR_ClearProgs (&cl.qcvm);
+
 	if (scr_drawdialog) // new game confirm
 	{
 		if (con_forcedup)
@@ -1157,6 +1163,7 @@ void SCR_UpdateScreen (qboolean use_tasks)
 	}
 	else
 	{
+		GL_SynchronizeEndRenderingTask ();
 		SCR_SetupFrame (NULL);
 		V_RenderView (use_tasks, INVALID_TASK_HANDLE, INVALID_TASK_HANDLE, INVALID_TASK_HANDLE);
 		S_ExtraUpdate ();

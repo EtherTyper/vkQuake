@@ -1446,8 +1446,8 @@ FIXME: make this buffer size safe someday
 
 static char *get_va_buffer (void)
 {
-	static char va_buffers[VA_NUM_BUFFS][VA_BUFFERLEN];
-	static int  buffer_idx = 0;
+	static THREAD_LOCAL char va_buffers[VA_NUM_BUFFS][VA_BUFFERLEN];
+	static THREAD_LOCAL int  buffer_idx = 0;
 	buffer_idx = (buffer_idx + 1) & (VA_NUM_BUFFS - 1);
 	return va_buffers[buffer_idx];
 }
@@ -1473,7 +1473,7 @@ QUAKE FILESYSTEM
 =============================================================================
 */
 
-int com_filesize;
+THREAD_LOCAL int com_filesize;
 
 //
 // on-disk pakfile
@@ -1493,10 +1493,10 @@ typedef struct
 
 #define MAX_FILES_IN_PACK 2048
 
-char com_gamenames[1024]; // eg: "hipnotic;quoth;warp" ... no id1
-char com_gamedir[MAX_OSPATH];
-char com_basedir[MAX_OSPATH];
-int  file_from_pak; // ZOID: global indicating that file came from a pak
+char             com_gamenames[1024]; // eg: "hipnotic;quoth;warp" ... no id1
+char             com_gamedir[MAX_OSPATH];
+char             com_basedir[MAX_OSPATH];
+THREAD_LOCAL int file_from_pak; // ZOID: global indicating that file came from a pak
 
 searchpath_t *com_searchpaths;
 searchpath_t *com_base_searchpaths;
@@ -2074,8 +2074,8 @@ _add_path:
 
 void COM_ResetGameDirectories (const char *newdirs)
 {
-	char         *newgamedirs = q_strdup (newdirs);
-	char         *newpath, *path;
+	char		 *newgamedirs = q_strdup (newdirs);
+	char		 *newpath, *path;
 	searchpath_t *search;
 	// Kill the extra game if it is loaded
 	while (com_searchpaths != com_base_searchpaths)
@@ -2199,6 +2199,7 @@ static void COM_Game_f (void)
 		}
 		ExtraMaps_NewGame ();
 		DemoList_Rebuild ();
+		SaveList_Rebuild ();
 		S_ClearAll ();
 
 		Con_Printf ("\"game\" changed to \"%s\"\n", COM_GetGameNames (true));

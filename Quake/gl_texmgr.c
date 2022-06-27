@@ -26,6 +26,12 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "quakedef.h"
 #include "gl_heap.h"
 
+#if defined(SDL_FRAMEWORK) || defined(NO_SDL_CONFIG)
+#include <SDL2/SDL.h>
+#else
+#include "SDL.h"
+#endif
+
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #define STB_IMAGE_RESIZE_STATIC
 #if defined(__GNUC__)
@@ -63,8 +69,7 @@ unsigned int d_8to24table_pants[256];
 static glheap_t **texmgr_heaps;
 static int        num_texmgr_heaps;
 
-static byte *image_resize_buffer;
-static int   image_resize_buffer_size;
+SDL_mutex *texmgr_mutex;
 
 /*
 ================================================================================
@@ -161,18 +166,21 @@ TexMgr_FindTexture
 */
 gltexture_t *TexMgr_FindTexture (qmodel_t *owner, const char *name)
 {
-	gltexture_t *glt;
+	SDL_LockMutex (texmgr_mutex);
+	gltexture_t *glt = NULL;
 
 	if (name)
 	{
 		for (glt = active_gltextures; glt; glt = glt->next)
 		{
 			if (glt->owner == owner && !strcmp (glt->name, name))
-				return glt;
+				goto unlock_mutex;
 		}
 	}
 
-	return NULL;
+unlock_mutex:
+	SDL_UnlockMutex (texmgr_mutex);
+	return glt;
 }
 
 /*
@@ -182,6 +190,7 @@ TexMgr_NewTexture
 */
 gltexture_t *TexMgr_NewTexture (void)
 {
+	SDL_LockMutex (texmgr_mutex);
 	gltexture_t *glt;
 
 	glt = free_gltextures;
@@ -190,6 +199,7 @@ gltexture_t *TexMgr_NewTexture (void)
 	active_gltextures = glt;
 
 	numgltextures++;
+	SDL_UnlockMutex (texmgr_mutex);
 	return glt;
 }
 
@@ -202,12 +212,13 @@ TexMgr_FreeTexture
 */
 void TexMgr_FreeTexture (gltexture_t *kill)
 {
+	SDL_LockMutex (texmgr_mutex);
 	gltexture_t *glt;
 
 	if (kill == NULL)
 	{
 		Con_Printf ("TexMgr_FreeTexture: NULL texture\n");
-		return;
+		goto unlock_mutex;
 	}
 
 	if (active_gltextures == kill)
@@ -218,7 +229,7 @@ void TexMgr_FreeTexture (gltexture_t *kill)
 
 		GL_DeleteTexture (kill);
 		numgltextures--;
-		return;
+		goto unlock_mutex;
 	}
 
 	for (glt = active_gltextures; glt; glt = glt->next)
@@ -231,11 +242,13 @@ void TexMgr_FreeTexture (gltexture_t *kill)
 
 			GL_DeleteTexture (kill);
 			numgltextures--;
-			return;
+			goto unlock_mutex;
 		}
 	}
 
 	Con_Printf ("TexMgr_FreeTexture: not found\n");
+unlock_mutex:
+	SDL_UnlockMutex (texmgr_mutex);
 }
 
 /*
@@ -247,6 +260,7 @@ compares each bit in "flags" to the one in glt->flags only if that bit is active
 */
 void TexMgr_FreeTextures (unsigned int flags, unsigned int mask)
 {
+	SDL_LockMutex (texmgr_mutex);
 	gltexture_t *glt, *next;
 
 	for (glt = active_gltextures; glt; glt = next)
@@ -255,6 +269,7 @@ void TexMgr_FreeTextures (unsigned int flags, unsigned int mask)
 		if ((glt->flags & mask) == (flags & mask))
 			TexMgr_FreeTexture (glt);
 	}
+	SDL_UnlockMutex (texmgr_mutex);
 }
 
 /*
@@ -264,6 +279,7 @@ TexMgr_FreeTexturesForOwner
 */
 void TexMgr_FreeTexturesForOwner (qmodel_t *owner)
 {
+	SDL_LockMutex (texmgr_mutex);
 	gltexture_t *glt, *next;
 
 	for (glt = active_gltextures; glt; glt = next)
@@ -272,6 +288,7 @@ void TexMgr_FreeTexturesForOwner (qmodel_t *owner)
 		if (glt && glt->owner == owner)
 			TexMgr_FreeTexture (glt);
 	}
+	SDL_UnlockMutex (texmgr_mutex);
 }
 
 /*
@@ -281,12 +298,12 @@ TexMgr_DeleteTextureObjects
 */
 void TexMgr_DeleteTextureObjects (void)
 {
+	SDL_LockMutex (texmgr_mutex);
 	gltexture_t *glt;
 
 	for (glt = active_gltextures; glt; glt = glt->next)
-	{
 		GL_DeleteTexture (glt);
-	}
+	SDL_UnlockMutex (texmgr_mutex);
 }
 
 /*
@@ -304,7 +321,7 @@ TexMgr_LoadPalette -- johnfitz -- was VID_SetPalette, moved here, renamed, rewri
 */
 void TexMgr_LoadPalette (void)
 {
-	byte *pal, *src, *dst;
+	byte *src, *dst;
 	int   i;
 	FILE *f;
 
@@ -312,7 +329,7 @@ void TexMgr_LoadPalette (void)
 	if (!f)
 		Sys_Error ("Couldn't load gfx/palette.lmp");
 
-	pal = (byte *)Mem_Alloc (768);
+	byte pal[768];
 	if (fread (pal, 1, 768, f) != 768)
 		Sys_Error ("Couldn't load gfx/palette.lmp");
 	fclose (f);
@@ -374,8 +391,6 @@ void TexMgr_LoadPalette (void)
 	// conchars palette, 0 and 255 are transparent
 	memcpy (d_8to24table_conchars, d_8to24table, 256 * 4);
 	((byte *)&d_8to24table_conchars[0])[3] = 0;
-
-	Mem_Free (pal);
 }
 
 /*
@@ -405,6 +420,8 @@ void TexMgr_Init (void)
 	static byte       greytexture_data[16] = {127, 127, 127, 255, 127, 127, 127, 255, 127, 127, 127, 255, 127, 127, 127, 255};  // 50% grey
 	extern texture_t *r_notexture_mip, *r_notexture_mip2;
 
+	texmgr_mutex = SDL_CreateMutex ();
+
 	// init texture list
 	free_gltextures = (gltexture_t *)Mem_Alloc (MAX_GLTEXTURES * sizeof (gltexture_t));
 	active_gltextures = NULL;
@@ -432,6 +449,8 @@ void TexMgr_Init (void)
 
 	// have to assign these here becuase Mod_Init is called before TexMgr_Init
 	r_notexture_mip->gltexture = r_notexture_mip2->gltexture = notexture;
+
+	texmgr_mutex = SDL_CreateMutex ();
 }
 
 /*
@@ -454,11 +473,11 @@ static unsigned *TexMgr_Downsample (unsigned *data, int in_width, int in_height,
 	assert ((out_width >= 1) && (out_width < in_width));
 	assert ((out_height >= 1) && (out_height < in_height));
 
-	if (out_size_bytes > image_resize_buffer_size)
-		image_resize_buffer = Mem_Realloc (image_resize_buffer, out_size_bytes);
-
-	stbir_resize_uint8 ((byte *)data, in_width, in_height, 0, (byte *)image_resize_buffer, out_width, out_height, 0, 4);
+	byte *image_resize_buffer;
+	TEMP_ALLOC (byte, image_resize_buffer, out_size_bytes);
+	stbir_resize_uint8 ((byte *)data, in_width, in_height, 0, image_resize_buffer, out_width, out_height, 0, 4);
 	memcpy (data, image_resize_buffer, out_size_bytes);
+	TEMP_FREE (image_resize_buffer);
 
 	return data;
 }
@@ -674,6 +693,7 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 	}
 	int num_mips = (glt->flags & TEXPREF_MIPMAP) ? TexMgr_DeriveNumMips (glt->width, glt->height) : 1;
 
+	SDL_LockMutex (texmgr_mutex);
 	const qboolean warp_image = (glt->flags & TEXPREF_WARPIMAGE);
 	if (warp_image)
 		num_mips = WARPIMAGEMIPS;
@@ -816,6 +836,8 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 		glt->storage_descriptor_set = VK_NULL_HANDLE;
 	}
 
+	SDL_UnlockMutex (texmgr_mutex);
+
 	// Don't upload data for warp image, will be updated by rendering
 	if (warp_image)
 		return;
@@ -833,17 +855,16 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 	int             staging_offset;
 	unsigned char  *staging_memory = R_StagingAllocate (staging_size, 4, &command_buffer, &staging_buffer, &staging_offset);
 
-	int num_regions = 0;
-	int mip_offset = 0;
+	int num_regions = 0;	
 
 	if (glt->flags & TEXPREF_MIPMAP)
 	{
+		int mip_offset = 0;
 		mipwidth = glt->width;
 		mipheight = glt->height;
 
 		while (mipwidth >= 1 && mipheight >= 1)
 		{
-			memcpy (staging_memory + mip_offset, data, mipwidth * mipheight * 4);
 			regions[num_regions].bufferOffset = staging_offset + mip_offset;
 			regions[num_regions].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 			regions[num_regions].imageSubresource.layerCount = 1;
@@ -855,17 +876,13 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 			mip_offset += mipwidth * mipheight * 4;
 			num_regions += 1;
 
-			if (mipwidth > 1 && mipheight > 1)
-				TexMgr_Downsample (data, mipwidth, mipheight, mipwidth / 2, mipheight / 2);
-
 			mipwidth /= 2;
 			mipheight /= 2;
 		}
 	}
 	else
 	{
-		memcpy (staging_memory + mip_offset, data, mipwidth * mipheight * 4);
-		regions[0].bufferOffset = staging_offset + mip_offset;
+		regions[0].bufferOffset = staging_offset;
 		regions[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		regions[0].imageSubresource.layerCount = 1;
 		regions[0].imageSubresource.mipLevel = 0;
@@ -899,6 +916,33 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 	image_memory_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	image_memory_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	vkCmdPipelineBarrier (command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
+
+	R_StagingBeginCopy ();
+	if (glt->flags & TEXPREF_MIPMAP)
+	{
+		int mip_offset = 0;
+		mipwidth = glt->width;
+		mipheight = glt->height;
+
+		while (mipwidth >= 1 && mipheight >= 1)
+		{
+			memcpy (staging_memory + mip_offset, data, mipwidth * mipheight * 4);
+
+			mip_offset += mipwidth * mipheight * 4;
+			num_regions += 1;
+
+			if (mipwidth > 1 && mipheight > 1)
+				TexMgr_Downsample (data, mipwidth, mipheight, mipwidth / 2, mipheight / 2);
+
+			mipwidth /= 2;
+			mipheight /= 2;
+		}
+	}
+	else
+	{
+		memcpy (staging_memory, data, mipwidth * mipheight * 4);
+	}
+	R_StagingEndCopy ();
 }
 
 /*
@@ -1237,6 +1281,8 @@ TexMgr_CollectGarbage
 */
 void TexMgr_CollectGarbage (void)
 {
+	SDL_LockMutex (texmgr_mutex);
+
 	int                num;
 	int                i;
 	texture_garbage_t *garbage;
@@ -1259,6 +1305,8 @@ void TexMgr_CollectGarbage (void)
 		GL_FreeFromHeaps (num_texmgr_heaps, texmgr_heaps, garbage->heap, garbage->heap_node, &num_vulkan_tex_allocations);
 	}
 	num_garbage_textures[current_garbage_index] = 0;
+
+	SDL_UnlockMutex (texmgr_mutex);
 }
 
 /*
@@ -1268,11 +1316,13 @@ GL_DeleteTexture
 */
 static void GL_DeleteTexture (gltexture_t *texture)
 {
+	SDL_LockMutex (texmgr_mutex);
+
 	int                garbage_index;
 	texture_garbage_t *garbage;
 
 	if (texture->image_view == VK_NULL_HANDLE)
-		return;
+		goto mutex_unlock;
 
 	if (in_update_screen)
 	{
@@ -1310,4 +1360,7 @@ static void GL_DeleteTexture (gltexture_t *texture)
 	texture->image = VK_NULL_HANDLE;
 	texture->heap = NULL;
 	texture->heap_node = NULL;
+
+mutex_unlock:
+	SDL_UnlockMutex (texmgr_mutex);
 }

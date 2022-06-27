@@ -53,6 +53,7 @@ int minimum_memory;
 client_t *host_client; // current client
 
 jmp_buf host_abortserver;
+jmp_buf screen_error;
 
 byte  *host_colormap;
 float  host_netinterval = 1.0 / 72;
@@ -183,6 +184,12 @@ void Host_Error (const char *error, ...)
 	va_end (argptr);
 	Con_Printf ("Host_Error: %s\n", string);
 
+	if (cl.qcvm.extfuncs.CSQC_DrawHud && in_update_screen)
+	{
+		inerror = false;
+		longjmp (screen_error, 1);
+	}
+
 	if (sv.active)
 		Host_ShutdownServer (false);
 
@@ -238,9 +245,7 @@ void Host_FindMaxClients (void)
 	else if (svs.maxclients > MAX_SCOREBOARD)
 		svs.maxclients = MAX_SCOREBOARD;
 
-	svs.maxclientslimit = svs.maxclients;
-	if (svs.maxclientslimit < 4)
-		svs.maxclientslimit = 4;
+	svs.maxclientslimit = MAX_SCOREBOARD;
 	svs.clients = (struct client_s *)Mem_Alloc (svs.maxclientslimit * sizeof (client_t));
 
 	if (svs.maxclients > 1)
@@ -1002,6 +1007,7 @@ void Host_Init (void)
 		ExtraMaps_Init (); // johnfitz
 		Modlist_Init ();   // johnfitz
 		DemoList_Init ();  // ericw
+		SaveList_Init ();
 		VID_Init ();
 		IN_Init ();
 		TexMgr_Init (); // johnfitz
