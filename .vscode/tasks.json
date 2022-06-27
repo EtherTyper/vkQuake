@@ -19,7 +19,10 @@
         {
             "label": "release",
             "type": "shell",
-            "command": "meson build/release -Dbuildtype=release && ninja -C build/release",
+            "command": [
+                "CC=gcc-11",
+                "meson build/release -Dbuildtype=release && ninja -C build/release",
+            ],
             "group": "build",
             "presentation": {
                 "reveal": "always",

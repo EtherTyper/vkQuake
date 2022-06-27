@@ -7,10 +7,10 @@ then
 fi
 
 find . -type f -name "*.vert" | \
-	while read f; do glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.vspv"; done
+	while read f; do glslangValidator -V ${f} --target-env vulkan1.1 -o "Compiled/Release/${f%.*}.vspv"; done
 
 find . -type f -name "*.frag" | \
-	while read f; do glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.fspv"; done
+	while read f; do glslangValidator -V ${f} --target-env vulkan1.1 -o "Compiled/Release/${f%.*}.fspv"; done
 
 find . -type f -name "*.comp" | \
 	while read f; do
@@ -19,7 +19,7 @@ find . -type f -name "*.comp" | \
 		if test "${filename#*$substring}" != "$filename"; then
 			glslangValidator -V ${f} --target-env vulkan1.1 -o "Compiled/Release/${f%.*}.cspv";
 		else
-			glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.cspv";
+			glslangValidator -V ${f} --target-env vulkan1.1 -o "Compiled/Release/${f%.*}.cspv";
 		fi
 	done
 

@@ -113,7 +113,10 @@ deps = [
 ]
 
 if build_machine.system() == 'darwin'
-    deps += cc.find_library('MoltenVK', required : true)
+    deps += declare_dependency(
+        link_args : '/usr/local/opt/molten-vk/lib/libMoltenVK.dylib',
+        include_directories : '/usr/local/opt/vulkan-headers/include'
+    )
 else
     deps += dependency('vulkan')
 endif
