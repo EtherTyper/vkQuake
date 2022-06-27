@@ -1,26 +1,25 @@
 #!/bin/bash
 
 #set your VULKAN_SDK location  before running
-VULKAN_SDK=~/VulkanSDK/1.3.216.0/macOS
 if [[ ! -x "./bintoc" ]]
 then
 	gcc bintoc.c -o bintoc
 fi
 
 find . -type f -name "*.vert" | \
-	while read f; do $VULKAN_SDK/bin/glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.vspv"; done
+	while read f; do glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.vspv"; done
 
 find . -type f -name "*.frag" | \
-	while read f; do $VULKAN_SDK/bin/glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.fspv"; done
+	while read f; do glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.fspv"; done
 
 find . -type f -name "*.comp" | \
 	while read f; do
 		filename=${f}
 		substring="sops"
 		if test "${filename#*$substring}" != "$filename"; then
-			$VULKAN_SDK/bin/glslangValidator -V ${f} --target-env vulkan1.1 -o "Compiled/Release/${f%.*}.cspv";
+			glslangValidator -V ${f} --target-env vulkan1.1 -o "Compiled/Release/${f%.*}.cspv";
 		else
-			$VULKAN_SDK/bin/glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.cspv";
+			glslangValidator -V ${f} -o "Compiled/Release/${f%.*}.cspv";
 		fi
 	done
 
